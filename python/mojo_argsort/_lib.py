@@ -33,7 +33,7 @@ def _load():
     lib.mas_insertion_argsort.restype = None
     lib.mas_insertion_argsort.argtypes = [ctypes.c_int64] * 7
     lib.mas_counting_argsort.restype = None
-    lib.mas_counting_argsort.argtypes = [ctypes.c_int64] * 9
+    lib.mas_counting_argsort.argtypes = [ctypes.c_int64] * 10
     lib.mas_count_descents.restype = ctypes.c_int64
     lib.mas_count_descents.argtypes = [ctypes.c_int64] * 5
     return lib
@@ -119,7 +119,7 @@ def insertion_argsort(keys: np.ndarray, descending: bool = False) -> np.ndarray:
 def counting_argsort(
     keys: np.ndarray, buckets: int, descending: bool = False
 ) -> np.ndarray:
-    """Stable counting sort of 32-bit keys by `key % buckets`."""
+    """Stable counting sort; bucket is the mapped key mod `buckets`."""
     keys = np.ascontiguousarray(keys)
     if buckets <= 0 or (buckets & (buckets - 1)) != 0:
         raise ValueError(f"buckets must be a positive power of two, got {buckets}")
@@ -132,12 +132,13 @@ def counting_argsort(
     idx = np.empty(n, dtype=np.int64)
     if n == 0:
         return idx
-    ka = np.empty(n, dtype=np.uint32)
-    va = np.empty(n, dtype=np.uint32)
+    ka = np.empty(n, dtype=np.uint64)
+    va = np.empty(n, dtype=np.uint64)
     hist = np.empty(buckets, dtype=np.uint32)
     lib.mas_counting_argsort(
         n, _addr(keys), _addr(idx), _addr(ka), _addr(va), _addr(hist),
-        int(buckets), _mode_of(keys.dtype), 1 if descending else 0,
+        int(buckets), 8 * keys.dtype.itemsize, _mode_of(keys.dtype),
+        1 if descending else 0,
     )
     return idx
 

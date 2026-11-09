@@ -183,3 +183,151 @@ def test_rejects_unsupported_input():
         ma.argsort(np.zeros((2, 3), dtype=np.float64))
     with pytest.raises(ValueError):
         ma.argsort(np.arange(10), method="quicksort")
+
+
+# --- Parity additions ---------------------------------------------------------
+# The upstream `argsort` package is not installed here (verified: importing it
+# fails with ModuleNotFoundError), so the reference is numpy's stable argsort,
+# which README records as defining the same contract. Integer index arrays are
+# compared exactly; the one floating-point value comparison below writes its
+# tolerance explicitly (rtol=0, atol=0), i.e. exact, because no arithmetic on
+# floats precedes it.
+
+
+@pytest.mark.parametrize("dtype", ALL_DTYPES)
+def test_full_range_matches_numpy_stable(dtype):
+    """Random full-range values, not just tie-heavy small values."""
+    rng = np.random.default_rng(2026)
+    kind = np.dtype(dtype).kind
+    if kind == "f":
+        x = rng.standard_normal(2000).astype(dtype)
+    elif dtype == np.int64:
+        x = rng.integers(0, 2**64, size=2000, dtype=np.uint64).view(np.int64)
+    elif dtype == np.uint64:
+        x = rng.integers(0, 2**64, size=2000, dtype=np.uint64)
+    else:
+        info = np.iinfo(dtype)
+        x = rng.integers(info.min, info.max, size=2000).astype(dtype)
+    assert np.array_equal(ma.argsort(x), np.argsort(x, kind="stable"))
+
+
+@pytest.mark.parametrize("dtype", ALL_DTYPES)
+def test_result_is_int64_permutation(dtype):
+    rng = np.random.default_rng(11)
+    x = rng.integers(-5, 5, size=100).astype(dtype) if np.dtype(dtype).kind != "f" else rng.standard_normal(100).astype(dtype)
+    got = ma.argsort(x)
+    assert got.dtype == np.int64
+    assert sorted(int(i) for i in got) == list(range(x.size))
+
+
+@pytest.mark.parametrize(
+    "dtype", [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64]
+)
+def test_descending_extremes_match_python_ints(dtype):
+    """Descending at each width's extremes; numpy negation wraps at INT64_MIN."""
+    info = np.iinfo(dtype)
+    vals = [info.min, info.max, 0, 1]
+    if info.min < 0:
+        vals.append(-1)
+        vals.append(info.min + 1)
+    else:
+        vals.append(2)
+    x = np.array(vals, dtype=dtype)
+    expect = np.array(sorted(range(x.size), key=lambda i: -int(x[i])))
+    assert np.array_equal(ma.argsort(x, descending=True), expect)
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_descending_infinity_matches_negated_numpy(dtype):
+    x = np.array([np.inf, 2.5, -np.inf, -1.0, 0.5], dtype=dtype)
+    assert np.array_equal(
+        ma.argsort(x, descending=True), np.argsort(-x, kind="stable")
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+def test_sorted_values_match_with_written_tolerance(dtype):
+    """Sorted float values match numpy's up to an explicit zero tolerance."""
+    rng = np.random.default_rng(42)
+    x = rng.standard_normal(1000).astype(dtype)
+    idx = ma.argsort(x)
+    # Exactness is pinned here: rtol=0 and atol=0, because the permutation is
+    # index arithmetic and no floating-point computation intervenes.
+    np.testing.assert_allclose(
+        x[idx].astype(np.float64),
+        np.sort(x).astype(np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert np.array_equal(idx, np.argsort(x, kind="stable"))
+
+
+def test_duplicates_are_stable_for_both_methods():
+    """Equal keys keep input order in ascending and descending order."""
+    x = np.array([2, 1, 2, 1, 2, 1], dtype=np.int64)
+    expect = np.argsort(x, kind="stable")
+    for method in ("radix", "insertion", "auto"):
+        assert np.array_equal(ma.argsort(x, method=method), expect)
+        assert np.array_equal(ma.argsort(x, method=method, descending=True),
+                              np.argsort(-x, kind="stable"))
+
+
+def test_empty_all_dtypes_and_methods():
+    for dtype in ALL_DTYPES:
+        e = np.array([], dtype=dtype)
+        assert ma.argsort(e).size == 0
+        assert ma.argsort(e, method="radix").size == 0
+        assert ma.argsort(e, method="insertion").size == 0
+        assert ma.argsort(e).dtype == np.int64
+    assert ma.argsort(np.array([9], dtype=np.int64), method="radix").tolist() == [0]
+    assert ma.argsort(np.array([9], dtype=np.int64), method="insertion").tolist() == [0]
+
+
+def test_nan_payloads_follow_bit_pattern_not_input_order():
+    """Distinct positive NaN payloads order by payload, unlike numpy stable.
+
+    This is the same documented bit-pattern divergence as negative NaN: the
+    mapped words of the two payloads differ, so no tie remains for stability
+    to break.
+    """
+    w1 = np.uint64(0x7FF8000000000001)
+    w2 = np.uint64(0x7FF8000000000002)
+    x = np.array([w2, w1], dtype=np.uint64).view(np.float64)
+    assert np.array_equal(ma.argsort(x), [1, 0])
+    # The divergence is real, not a silent match: numpy would keep input order.
+    assert np.array_equal(np.argsort(x, kind="stable"), [0, 1])
+    assert np.array_equal(ma.argsort(x, method="insertion"), [1, 0])
+    y = np.array([w1, w2], dtype=np.uint64).view(np.float64)
+    assert np.array_equal(ma.argsort(y), [0, 1])
+
+
+def test_reversed_stride_input():
+    rev = np.arange(10, dtype=np.float64)[::-1]
+    assert np.array_equal(ma.argsort(rev), np.argsort(rev, kind="stable"))
+    assert np.array_equal(ma.argsort(rev), np.arange(9, -1, -1))
+
+
+def test_degenerate_rejections_match_upstream_scope():
+    """Non-numeric and non-scalar shapes raise the port's documented classes."""
+    # numpy argsort sorts bool/complex/strings, but the port's documented
+    # scope is numeric 1-D only, so rejection (not a value) is the contract.
+    for bad in (
+        np.array([True, False]),
+        np.array([1 + 2j, 3 + 0j]),
+        np.array(["b", "a"]),
+    ):
+        with pytest.raises(TypeError):
+            ma.argsort(bad)
+    with pytest.raises(ValueError):
+        ma.argsort(np.array(5))
+    with pytest.raises(ValueError):
+        ma.argsort(np.arange(3), method=None)
+
+
+def test_input_is_not_mutated():
+    x = np.array([3.0, 1.0, 2.0], dtype=np.float64)
+    keep = x.copy()
+    ma.argsort(x)
+    ma.argsort(x, descending=True)
+    ma.argsort(x, method="insertion")
+    assert np.array_equal(x, keep)

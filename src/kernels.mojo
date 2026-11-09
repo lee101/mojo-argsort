@@ -184,44 +184,67 @@ def mas_insertion_argsort(
 @export("mas_counting_argsort")
 def mas_counting_argsort(
     n: Int, keys_addr: Int, idx_addr: Int, ka_addr: Int, va_addr: Int,
-    hist_addr: Int, buckets: Int, mode: Int, descending: Int
+    hist_addr: Int, buckets: Int, word_bits: Int, mode: Int, descending: Int
 ) abi("C"):
-    """Counting sort on 32-bit keys by `key % buckets`, ascending or descending.
+    """Counting sort by mapped key mod `buckets`, ascending or descending.
 
     `buckets` must be a power of two. `hist_addr` must hold `buckets` entries.
     Descending reverses the bucket order and leaves equal remainders in input
-    order, so the result is a stable sort on `x % buckets`.
+    order, so the result is a stable sort on the mapped remainder. `word_bits`
+    is 32 or 64; a 64-bit key is mapped as a 64-bit word, not as two words.
     """
+    # Upstream argsort counting_argsort: bucket = mapped key mod buckets.
     var idx = _u64p(idx_addr)
     var h = _u32p(hist_addr)
     if n <= 0 or buckets <= 0:
         return
-    var src = _u32p(keys_addr)
-    var ka = _u32p(ka_addr)
-    var va = _u32p(va_addr)
-    var mask = UInt32(buckets - 1)
+    var ka = _u64p(ka_addr)
+    var va = _u64p(va_addr)
+    var mask = UInt64(buckets - 1)
     for b in range(buckets):
         h[unsafe_offset=b] = UInt32(0)
+    if word_bits == 32:
+        var src32 = _u32p(keys_addr)
+        for i in range(n):
+            var d = Int(UInt64(_map32(src32[unsafe_offset=i], mode, 0)) & mask)
+            if descending != 0:
+                d = buckets - 1 - d
+            h[unsafe_offset=d] += UInt32(1)
+        var s = UInt32(0)
+        for b in range(buckets):
+            var c = h[unsafe_offset=b]
+            h[unsafe_offset=b] = s
+            s += c
+        for i in range(n):
+            var d = Int(UInt64(_map32(src32[unsafe_offset=i], mode, 0)) & mask)
+            if descending != 0:
+                d = buckets - 1 - d
+            var pos = h[unsafe_offset=d]
+            h[unsafe_offset=d] = pos + UInt32(1)
+            ka[unsafe_offset=Int(pos)] = UInt64(i)
+            va[unsafe_offset=Int(pos)] = UInt64(i)
+    else:
+        var src64 = _u64p(keys_addr)
+        for i in range(n):
+            var d = Int(_map64(src64[unsafe_offset=i], mode, 0) & mask)
+            if descending != 0:
+                d = buckets - 1 - d
+            h[unsafe_offset=d] += UInt32(1)
+        var s = UInt32(0)
+        for b in range(buckets):
+            var c = h[unsafe_offset=b]
+            h[unsafe_offset=b] = s
+            s += c
+        for i in range(n):
+            var d = Int(_map64(src64[unsafe_offset=i], mode, 0) & mask)
+            if descending != 0:
+                d = buckets - 1 - d
+            var pos = h[unsafe_offset=d]
+            h[unsafe_offset=d] = pos + UInt32(1)
+            ka[unsafe_offset=Int(pos)] = UInt64(i)
+            va[unsafe_offset=Int(pos)] = UInt64(i)
     for i in range(n):
-        var d = Int(_map32(src[unsafe_offset=i], mode, 0) & mask)
-        if descending != 0:
-            d = buckets - 1 - d
-        h[unsafe_offset=d] += UInt32(1)
-    var s = UInt32(0)
-    for b in range(buckets):
-        var c = h[unsafe_offset=b]
-        h[unsafe_offset=b] = s
-        s += c
-    for i in range(n):
-        var d = Int(_map32(src[unsafe_offset=i], mode, 0) & mask)
-        if descending != 0:
-            d = buckets - 1 - d
-        var pos = h[unsafe_offset=d]
-        h[unsafe_offset=d] = pos + UInt32(1)
-        ka[unsafe_offset=Int(pos)] = UInt32(i)
-        va[unsafe_offset=Int(pos)] = UInt32(i)
-    for i in range(n):
-        idx[unsafe_offset=i] = UInt64(ka[unsafe_offset=i])
+        idx[unsafe_offset=i] = ka[unsafe_offset=i]
 
 @export("mas_count_descents")
 def mas_count_descents(
