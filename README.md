@@ -102,24 +102,24 @@ NumPy formulation.
 
 | case | reference | mojo-argsort | result |
 | --- | ---: | ---: | ---: |
-| argsort int32 n=1048576 | 139.13 ms | 40.70 ms | 3.42x faster |
-| argsort int32 n=1048576, vs `np.argsort` default quicksort | 76.27 ms | 41.77 ms | 1.83x faster |
-| argsort int64 n=1048576 | 142.10 ms | 128.82 ms | 1.10x |
-| argsort float64 n=1048576 | 159.00 ms | 132.20 ms | 1.20x |
-| argsort int64 descending n=1048576 | 116.14 ms | 103.85 ms | 1.12x |
-| argsort n=32, 200000 calls | 437.18 ms | 2924.15 ms | **0.15x, slower** |
-| counting_argsort n=1048576 b=4096 | 137.65 ms | 30.02 ms | 4.59x faster |
-| lexsort 2 keys n=262144 | 52.93 ms | 35.49 ms | 1.49x faster |
-| count_descents n=4194304 | 16.94 ms | 3.15 ms | 5.38x faster |
+| argsort int32 n=1048576 | 129.04 ms | 37.98 ms | 3.40x faster |
+| argsort int32 n=1048576, vs `np.argsort` default quicksort | 71.16 ms | 38.47 ms | 1.85x faster |
+| argsort int64 n=1048576 | 136.03 ms | 105.89 ms | 1.28x |
+| argsort float64 n=1048576 | 147.47 ms | 120.36 ms | 1.23x |
+| argsort int64 descending n=1048576 | 107.73 ms | 94.61 ms | 1.14x |
+| argsort n=32, 200000 calls | 411.77 ms | 2891.61 ms | **0.14x, slower** |
+| counting_argsort n=1048576 b=4096 | 127.99 ms | 30.58 ms | 4.19x faster |
+| lexsort 2 keys n=262144 | 52.30 ms | 34.39 ms | 1.52x faster |
+| count_descents n=4194304 | 16.96 ms | 3.08 ms | 5.51x faster |
 
 The wins and the losses are both real:
 
 - 32-bit keys win because a radix sort of 4 bytes needs 4 passes, and NumPy's
   stable path is a merge sort that moves indices rather than bytes.
-- 64-bit and float64 keys are near parity in this run (1.10x and 1.20x): at 64
+- 64-bit and float64 keys are near parity in this run (1.28x and 1.23x): at 64
   bits the pass count doubles to 8, so the extra memory traffic largely cancels
   the radix advantage. Earlier runs on this shared box measured this pair at
-  0.63–1.31x across repeats, i.e. within load noise of parity; see
+  0.81–1.38x / 0.94–1.24x across repeats, i.e. within load noise of parity; see
   `bench/verify.md`.
 - The short-input case loses to allocation and ctypes overhead, not to the
   kernel: at n=32 the sort itself is under a microsecond, while the shim
@@ -127,7 +127,7 @@ The wins and the losses are both real:
   comparison sort is still the right algorithm, it is just dwarfed by the call.
 - `lexsort` is a chain of full radix sorts, one per key, while `np.lexsort`
   walks a single `void*` argument record; in this run the chain still came out
-  ahead (1.49x).
+  ahead (1.52x).
 - `count_descents` wins because it is a pure reduction with no output array;
   NumPy has to materialise a full `diff` array to answer the same question.
 
