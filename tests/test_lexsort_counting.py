@@ -374,3 +374,192 @@ def test_count_descents_and_is_sorted_empty_singleton_descending():
         ma.is_sorted(np.zeros((2, 3), dtype=np.int64))
     with pytest.raises(TypeError):
         ma.count_descents(np.array([True, False]))
+
+
+# --- TEST-phase parity audit ---------------------------------------------------
+# Upstream `argsort` is not installed (verified: import argsort raises
+# ModuleNotFoundError under pixi run python), so the reference for lexsort is
+# numpy.lexsort, and for counting_argsort/count_descents/is_sorted it is Python
+# integer arithmetic. Each test below composes the port with that upstream
+# reference rather than a hand-written literal. Index comparisons are exact
+# (np.array_equal); every count/float-value comparison writes its tolerance
+# explicitly as rtol=0.0, atol=0.0 (exact), because the kernel performs no
+# floating-point arithmetic on these paths.
+
+
+def test_lexsort_composes_with_numpy_reference():
+    """lexsort(b, a) composes with np.lexsort((b, a)) and with argsort."""
+    rng = np.random.default_rng(2029)
+    for n in (0, 1, 2, 17, 64, 65, 1000):
+        a = rng.integers(0, 4, size=n)
+        b = rng.integers(0, 3, size=n)
+        assert np.array_equal(ma.lexsort(b, a), np.lexsort((b, a))), f"n={n}"
+    # Lexsort with one key composes with argsort (numpy's own equivalence).
+    x = rng.integers(-9, 9, size=500)
+    assert np.array_equal(ma.lexsort(x), ma.argsort(x))
+    assert np.array_equal(ma.lexsort(x), np.argsort(x, kind="stable"))
+
+
+def test_lexsort_float_keys_sorted_values_with_written_tolerance():
+    rng = np.random.default_rng(2030)
+    a = rng.standard_normal(1000)
+    b = rng.integers(0, 3, size=1000)
+    idx = ma.lexsort(b, a)
+    assert np.array_equal(idx, np.lexsort((b, a)))
+    np.testing.assert_allclose(a[idx], np.sort(a), rtol=0.0, atol=0.0)
+    assert np.array_equal(a[idx], np.sort(a))
+
+
+def test_lexsort_nan_inf_with_mapped_bit_reference():
+    """NaN/inf lexsort keys follow mapped bits, matching argsort."""
+    x = np.array([1.0, np.nan, -np.nan, 2.0, -np.inf], dtype=np.float64)
+    b = np.zeros(5, dtype=np.int64)
+    words = x.view(np.uint64)
+    sign = np.uint64(1) << np.uint64(63)
+    mapped = np.where((words & sign) == sign, ~words, words ^ sign)
+    expect = np.array(sorted(range(x.size), key=lambda i: int(mapped[i])))
+    assert np.array_equal(ma.lexsort(b, x), expect)
+    assert np.array_equal(ma.lexsort(b, x), ma.argsort(x))
+    # Finite/inf keys without NaN or signed zero compose with numpy.
+    y = np.array([np.inf, 1.0, -np.inf, 1.0, 2.5], dtype=np.float64)
+    c = np.array([2, 0, 0, 1, 1], dtype=np.int64)
+    assert np.array_equal(ma.lexsort(c, y), np.lexsort((c, y)))
+
+
+def test_lexsort_degenerate_compositions():
+    """Empty/singleton/duplicates compose with numpy; mismatches raise."""
+    assert np.array_equal(ma.lexsort(np.array([], dtype=np.int64)),
+                          np.lexsort((np.array([], dtype=np.int64),)))
+    one_b, one_a = np.array([3], dtype=np.int64), np.array([5], dtype=np.int64)
+    assert np.array_equal(ma.lexsort(one_b, one_a), [0])
+    dup_a = np.array([1, 1, 1], dtype=np.int64)
+    dup_b = np.array([2, 2, 2], dtype=np.int64)
+    assert np.array_equal(ma.lexsort(dup_b, dup_a), np.lexsort((dup_b, dup_a)))
+    assert np.array_equal(ma.lexsort(dup_b, dup_a), np.arange(3))
+    # Mismatched lengths: same error class as np.lexsort (ValueError).
+    with pytest.raises(ValueError):
+        ma.lexsort(np.arange(3), np.arange(4))
+    with pytest.raises(ValueError):
+        np.lexsort((np.arange(3), np.arange(4)))
+    with pytest.raises(ValueError):
+        ma.lexsort()
+    with pytest.raises(ValueError):
+        ma.lexsort(np.zeros((2, 3)), np.arange(6))
+    with pytest.raises(TypeError):
+        ma.lexsort(np.array([True, False]), np.array([1, 0]))
+
+
+def test_counting_argsort_composes_with_python_modulo_reference():
+    """counting_argsort(x, b) == indices sorted by x % b (Python ints)."""
+    rng = np.random.default_rng(2031)
+    for dtype in (np.int32, np.uint32, np.int64, np.uint64):
+        for buckets in (1, 2, 4, 8, 256, 1024):
+            x = rng.integers(0, 10000, size=1000).astype(dtype)
+            expect = np.array(sorted(range(x.size), key=lambda i: int(x[i]) % buckets))
+            got = ma.counting_argsort(x, buckets)
+            assert np.array_equal(got, expect)
+            remainders = (x[got] % buckets).astype(np.float64)
+            np.testing.assert_allclose(
+                remainders,
+                np.array(sorted(int(v) % buckets for v in x), dtype=np.float64),
+                rtol=0.0, atol=0.0,
+            )
+
+
+def test_counting_argsort_degenerate_compositions():
+    """Empty, singleton, duplicates, NaN/inf and bad buckets."""
+    e = np.array([], dtype=np.int32)
+    assert ma.counting_argsort(e, 4).size == 0
+    assert np.array_equal(ma.counting_argsort(np.array([7], dtype=np.int32), 4), [0])
+    dup = np.array([7, 7, 7, 7], dtype=np.int32)
+    assert np.array_equal(ma.counting_argsort(dup, 4), np.arange(4))
+    assert np.array_equal(ma.counting_argsort(dup, 4, descending=True), np.arange(4))
+    x = np.array([1.0, np.nan, 2.0], dtype=np.float64)
+    mapped = _mapped_float64(x)
+    expect = np.array(sorted(range(x.size), key=lambda i: int(mapped[i]) % 4))
+    assert np.array_equal(ma.counting_argsort(x, 4), expect)
+    inf = np.array([np.inf, 1.0, -np.inf], dtype=np.float64)
+    mapped_inf = _mapped_float64(inf)
+    expect_inf = np.array(sorted(range(inf.size), key=lambda i: int(mapped_inf[i]) % 8))
+    assert np.array_equal(ma.counting_argsort(inf, 8), expect_inf)
+    for bad in (0, 3, -4, 6):
+        with pytest.raises(ValueError):
+            ma.counting_argsort(np.array([1, 2], dtype=np.int32), bad)
+    with pytest.raises(ValueError):
+        ma.counting_argsort(np.zeros((2, 3), dtype=np.int32), 4)
+    with pytest.raises(TypeError):
+        ma.counting_argsort(np.array([True, False]), 2)
+
+
+def test_count_descents_composes_with_numpy_diff_reference():
+    """count_descents == count_nonzero(diff < 0), tolerance rtol/atol=0."""
+    rng = np.random.default_rng(2032)
+    # Why the reference is widened: np.diff on uint64 wraps (e.g.
+    # np.diff(np.array([2**64-1, 5], dtype=np.uint64)) is 6, not a negative),
+    # and np.diff on int8 wraps too, so the reference widens to int64/float64
+    # before differencing -- exactly as the pre-existing
+    # test_count_descents_matches_numpy does ("widen before differencing").
+    # The port counts descents on mapped keys directly, so its result equals
+    # the widened count, not the naive in-dtype diff count.
+    for dtype in (np.int8, np.int16, np.int32, np.int64,
+                  np.uint8, np.uint16, np.uint32, np.uint64,
+                  np.float16, np.float32, np.float64):
+        if np.dtype(dtype).kind == "f":
+            x = rng.standard_normal(777).astype(dtype)
+        elif np.dtype(dtype).kind == "u":
+            x = rng.integers(0, 100, size=777).astype(dtype)
+        else:
+            x = rng.integers(-100, 100, size=777).astype(dtype)
+        if np.dtype(dtype).kind == "f":
+            expect = int(np.count_nonzero(np.diff(x.astype(np.float64)) < 0))
+        elif np.dtype(dtype).kind == "u":
+            # uint64 values >= 2**63 cannot be widened to int64; compare
+            # adjacent elements directly (no subtraction, so no wrap).
+            expect = int(np.count_nonzero(x[1:] < x[:-1]))
+        else:
+            expect = int(np.count_nonzero(np.diff(x.astype(np.int64)) < 0))
+        np.testing.assert_allclose(float(ma.count_descents(x)), float(expect),
+                                   rtol=0.0, atol=0.0)
+        assert ma.count_descents(x) == expect
+
+
+def test_count_descents_degenerate_compositions():
+    """Empty/singleton/duplicates/NaN-inf compose with mapped reference."""
+    assert ma.count_descents(np.array([], dtype=np.int64)) == 0
+    assert ma.count_descents(np.array([7], dtype=np.int64)) == 0
+    dup = np.array([2, 2, 1, 1, 3], dtype=np.int64)
+    expect = int(np.count_nonzero(np.diff(dup) < 0))
+    assert ma.count_descents(dup) == expect == 1
+    x = np.array([1.0, np.nan, 0.0], dtype=np.float64)
+    mapped = _mapped_float64(x)
+    assert ma.count_descents(x) == int(np.sum(mapped[1:] < mapped[:-1])) == 1
+    inf = np.array([np.inf, 1.0, -np.inf, 0.0], dtype=np.float64)
+    mapped_inf = _mapped_float64(inf)
+    assert ma.count_descents(inf) == int(np.sum(mapped_inf[1:] < mapped_inf[:-1]))
+    with pytest.raises(ValueError):
+        ma.count_descents(np.zeros((2, 3), dtype=np.int64))
+    with pytest.raises(TypeError):
+        ma.count_descents(np.array([True, False]))
+
+
+def test_is_sorted_composes_with_count_descents_reference():
+    """is_sorted == (count_descents == 0), tolerance rtol/atol=0."""
+    rng = np.random.default_rng(2033)
+    for dtype in (np.int32, np.int64, np.float32, np.float64):
+        x = rng.integers(-9, 9, size=300).astype(dtype) \
+            if np.dtype(dtype).kind != "f" else rng.standard_normal(300).astype(dtype)
+        expect_desc = int(np.count_nonzero(
+            np.diff(x.astype(np.int64)) < 0)) if np.dtype(dtype).kind != "f" \
+            else int(np.count_nonzero(np.diff(x.astype(np.float64)) < 0))
+        np.testing.assert_allclose(float(ma.is_sorted(x)),
+                                   float(expect_desc == 0), rtol=0.0, atol=0.0)
+        assert ma.is_sorted(x) == (ma.count_descents(x) == 0)
+        assert ma.is_sorted(x, descending=True) == (ma.count_descents(x, descending=True) == 0)
+    assert ma.is_sorted(np.array([], dtype=np.int64))
+    assert ma.is_sorted(np.array([7], dtype=np.int64))
+    assert ma.is_sorted(np.array([1, 1, 2], dtype=np.int64))
+    assert ma.is_sorted(np.array([2, 1, 1], dtype=np.int64), descending=True)
+    with pytest.raises(ValueError):
+        ma.is_sorted(np.zeros((2, 3), dtype=np.int64))
+    with pytest.raises(TypeError):
+        ma.is_sorted(np.array([True, False]))

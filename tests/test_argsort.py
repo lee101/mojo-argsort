@@ -331,3 +331,89 @@ def test_input_is_not_mutated():
     ma.argsort(x, descending=True)
     ma.argsort(x, method="insertion")
     assert np.array_equal(x, keep)
+
+
+# --- TEST-phase parity audit ---------------------------------------------------
+# Upstream `argsort` is not installed (verified: import argsort raises
+# ModuleNotFoundError under pixi run python), so the reference is
+# numpy.argsort(kind="stable") for argsort, np.lexsort for lexsort, Python
+# integer arithmetic for counting_argsort/count_descents/is_sorted.
+# Every comparison below composes the port with the upstream reference instead
+# of comparing the port to a hand-written literal. Index arrays are exact
+# (np.array_equal); every float-value or integer-count comparison writes its
+# tolerance explicitly as rtol=0.0, atol=0.0 (exact), because the kernel does
+# no floating-point arithmetic.
+
+
+@pytest.mark.parametrize("dtype", ALL_DTYPES)
+def test_argsort_composes_with_numpy_reference(dtype):
+    """argsort(x) == np.argsort(x, kind="stable") index-for-index."""
+    rng = np.random.default_rng(2027)
+    if np.dtype(dtype).kind == "f":
+        x = rng.standard_normal(500).astype(dtype)
+    else:
+        info = np.iinfo(dtype)
+        x = rng.integers(max(info.min, -1000), min(info.max, 1000) + 1, size=500).astype(dtype)
+    got, expect = ma.argsort(x), np.argsort(x, kind="stable")
+    assert np.array_equal(got, expect)
+    assert np.array_equal(x[got], x[expect])
+    if np.dtype(dtype).kind == "f":
+        np.testing.assert_allclose(
+            np.sort(x.astype(np.float64)),
+            x[got].astype(np.float64),
+            rtol=0.0, atol=0.0,
+        )
+
+
+def test_argsort_primary_sorted_values_with_written_tolerance():
+    rng = np.random.default_rng(2028)
+    for dtype in (np.float16, np.float32, np.float64):
+        x = rng.standard_normal(1000).astype(dtype)
+        idx = ma.argsort(x)
+        np.testing.assert_allclose(
+            x[idx].astype(np.float64), np.sort(x).astype(np.float64),
+            rtol=0.0, atol=0.0,
+        )
+
+
+def test_argsort_degenerate_compositions():
+    """Empty, singleton, duplicates: same values as the numpy reference."""
+    for dtype in ALL_DTYPES:
+        e = np.array([], dtype=dtype)
+        assert np.array_equal(ma.argsort(e), np.argsort(e, kind="stable"))
+        s = np.array([7], dtype=dtype)
+        assert np.array_equal(ma.argsort(s), np.argsort(s, kind="stable"))
+        assert np.array_equal(ma.argsort(s, descending=True), [0])
+    dup = np.array([2, 1, 2, 1, 2, 1], dtype=np.int64)
+    assert np.array_equal(ma.argsort(dup), np.argsort(dup, kind="stable"))
+    assert np.array_equal(ma.argsort(dup, descending=True),
+                          np.argsort(-dup, kind="stable"))
+
+
+def test_argsort_nan_inf_all_dtypes_compositions():
+    """Finite/inf order matches numpy; NaN order follows mapped bits."""
+    x = np.array([np.inf, 2.0, -np.inf, 1.0, -1.0], dtype=np.float64)
+    assert np.array_equal(ma.argsort(x), np.argsort(x, kind="stable"))
+    assert np.array_equal(ma.argsort(x, descending=True),
+                          np.argsort(-x, kind="stable"))
+    # NaN: positive NaN above finite like numpy, negative NaN first (documented).
+    y = np.array([1.0, np.nan, -np.nan, 2.0], dtype=np.float64)
+    words = y.view(np.uint64)
+    sign = np.uint64(1) << np.uint64(63)
+    mapped = np.where((words & sign) == sign, ~words, words ^ sign)
+    expect = np.array(sorted(range(y.size), key=lambda i: int(mapped[i])))
+    assert np.array_equal(ma.argsort(y), expect)
+
+
+def test_argsort_mismatched_shapes_raise_same_class_as_upstream_scope():
+    """2-D/0-D raise ValueError (port scope), non-numeric raise TypeError."""
+    with pytest.raises(ValueError):
+        ma.argsort(np.zeros((2, 3), dtype=np.float64))
+    with pytest.raises(ValueError):
+        ma.argsort(np.array(5))
+    with pytest.raises(TypeError):
+        ma.argsort(np.array([True, False]))
+    with pytest.raises(TypeError):
+        ma.argsort(np.array([1 + 2j, 3 + 0j]))
+    with pytest.raises(TypeError):
+        ma.argsort(np.array(["b", "a"]))
